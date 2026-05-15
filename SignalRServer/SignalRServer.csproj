@@ -6,4 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
   </PropertyGroup>
 
+  <ItemGroup>
+    <PackageReference Include="FluentFTP" Version="54.1.2" />
+  </ItemGroup>
+
 </Project>

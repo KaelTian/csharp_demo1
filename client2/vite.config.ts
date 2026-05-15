@@ -9,6 +9,9 @@ export default defineConfig({
       '/hubs': {
         target: 'http://localhost:5060',
         ws: true
+      },
+      '/api': {
+        target: 'http://localhost:5060'
       }
     }
   }

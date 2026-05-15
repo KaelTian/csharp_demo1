@@ -3,6 +3,7 @@ using SignalRServer.Hubs;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddSignalR();
+builder.Services.AddControllers();
 
 builder.Services.AddCors(options =>
 {
@@ -19,6 +20,7 @@ var app = builder.Build();
 app.UseCors();
 
 app.MapHub<DemoHub>("/hubs/demo");
+app.MapControllers();
 
 Console.WriteLine("SignalR Server running on http://localhost:5060");
 app.Run("http://0.0.0.0:5060");
