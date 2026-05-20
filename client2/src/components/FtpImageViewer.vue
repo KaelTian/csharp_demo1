@@ -1,23 +1,43 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 
 /* ==================== FTP 源 ==================== */
 const FTP_API_BASE = '/api/ftp/images'
 const HTTP_IMAGE_BASE = 'http://192.168.0.189:9526'
 
-const ftpImages = ref<string[]>([])
+const ftpFiles = ref<string[]>([])
+const directories = ref<string[]>([])
 const ftpLoading = ref(false)
 const ftpError = ref('')
+const currentDir = ref('')
+const dirHistory = ref<string[]>([])
+
 const selectedImage = ref<string | null>(null)
 const previewType = ref<'ftp' | 'http'>('ftp')
 
-async function loadFtpImages() {
+// 面包屑：把 currentDir 按 "/" 拆分成 [{ name, path }, ...]
+const breadcrumbs = computed(() => {
+  const segments = currentDir.value ? currentDir.value.split('/') : []
+  const crumbs: { name: string; path: string }[] = []
+  let accumulated = ''
+  for (const seg of segments) {
+    accumulated = accumulated ? `${accumulated}/${seg}` : seg
+    crumbs.push({ name: seg, path: accumulated })
+  }
+  return crumbs
+})
+
+async function loadFtpImages(dir?: string) {
   ftpLoading.value = true
   ftpError.value = ''
   try {
-    const res = await fetch(FTP_API_BASE)
+    const url = dir ? `${FTP_API_BASE}?path=${encodeURIComponent(dir)}` : FTP_API_BASE
+    const res = await fetch(url)
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    ftpImages.value = await res.json()
+    const data = await res.json()
+    directories.value = data.directories || []
+    ftpFiles.value = data.files || []
+    currentDir.value = data.currentPath || ''
   } catch (err: any) {
     ftpError.value = '无法连接 FTP 服务器: ' + err.message
   } finally {
@@ -25,13 +45,102 @@ async function loadFtpImages() {
   }
 }
 
-function ftpImageUrl(name: string) {
-  return `${FTP_API_BASE}/${encodeURIComponent(name)}`
+function enterDir(name: string) {
+  const next = currentDir.value ? `${currentDir.value}/${name}` : name
+  dirHistory.value.push(currentDir.value)
+  loadFtpImages(next)
+}
+
+function goBack() {
+  const prev = dirHistory.value.pop()
+  if (prev !== undefined) loadFtpImages(prev || undefined)
+}
+
+function goToDir(path: string) {
+  dirHistory.value.push(currentDir.value)
+  loadFtpImages(path || undefined)
+}
+
+function ftpImageUrl(path: string) {
+  return `${FTP_API_BASE}/${path.split('/').map(encodeURIComponent).join('/')}`
 }
 
 function openFtpPreview(name: string) {
-  selectedImage.value = name
+  // name 可能是含路径的文件名，拼接 currentDir 构建完整路径
+  const fullPath = currentDir.value ? `${currentDir.value}/${name}` : name
+  selectedImage.value = fullPath
   previewType.value = 'ftp'
+}
+
+/* ==================== 流式下载示例 ==================== */
+const downloadProgress = ref(0)
+const downloading = ref(false)
+const downloadStatus = ref('')
+
+async function downloadWithProgress(name: string) {
+  downloading.value = true
+  downloadProgress.value = 0
+  downloadStatus.value = '准备下载...'
+
+  try {
+    const res = await fetch(ftpImageUrl(name))
+
+    const total = Number(res.headers.get('content-length') || 0)
+    downloadStatus.value = `文件大小: ${(total / 1024).toFixed(1)} KB`
+
+    const reader = res.body!.getReader()
+    const chunks: BlobPart[] = []
+    let received = 0
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      chunks.push(value.buffer)
+      received += value.length
+      if (total) {
+        downloadProgress.value = Math.round((received / total) * 100)
+      }
+    }
+
+    const blob = new Blob(chunks, { type: res.headers.get('content-type') || 'image/jpeg' })
+    const url = URL.createObjectURL(blob)
+
+    const a = document.createElement('a')
+    a.href = url
+    a.download = name.split('/').pop() || name
+    a.click()
+    URL.revokeObjectURL(url)
+
+    downloadStatus.value = '✅ 下载完成'
+  } catch (err: any) {
+    downloadStatus.value = '❌ 下载失败: ' + err.message
+  } finally {
+    downloading.value = false
+    downloadProgress.value = 0
+  }
+}
+
+/* ==================== Range 请求示例 ==================== */
+async function fetchImageRange(name: string, signal?: AbortSignal) {
+  const headRes = await fetch(ftpImageUrl(name), { method: 'HEAD' })
+  const total = Number(headRes.headers.get('content-length') || 0)
+  if (!total) throw new Error('无法获取文件大小')
+
+  const chunkSize = Math.ceil(total / 4)
+  const chunks: BlobPart[] = []
+
+  for (let start = 0; start < total; start += chunkSize) {
+    const end = Math.min(start + chunkSize - 1, total - 1)
+    const res = await fetch(ftpImageUrl(name), {
+      headers: { Range: `bytes=${start}-${end}` },
+      signal,
+    })
+
+    if (res.status !== 206) throw new Error('服务器不支持 Range 请求')
+    chunks.push(await res.blob())
+  }
+
+  return new Blob(chunks, { type: headRes.headers.get('content-type') || 'image/jpeg' })
 }
 
 /* ==================== HTTP 源 ==================== */
@@ -57,7 +166,7 @@ function closePreview() {
   httpPreviewUrl.value = ''
 }
 
-onMounted(loadFtpImages)
+onMounted(() => loadFtpImages())
 </script>
 
 <template>
@@ -65,23 +174,61 @@ onMounted(loadFtpImages)
     <h2 class="section-title">📁 FTP 服务器图片</h2>
     <p class="section-desc">FTP: ftp://192.168.0.189（通过 API 代理）</p>
 
+    <!-- 面包屑导航 -->
+    <nav v-if="!ftpLoading" class="breadcrumb">
+      <span
+        class="crumb"
+        :class="{ active: !currentDir }"
+        @click="goToDir('')"
+      >根目录</span>
+      <template v-for="(crumb, i) in breadcrumbs" :key="crumb.path">
+        <span class="crumb-sep">/</span>
+        <span
+          class="crumb"
+          :class="{ active: i === breadcrumbs.length - 1 }"
+          @click="goToDir(crumb.path)"
+        >{{ crumb.name }}</span>
+      </template>
+    </nav>
+
     <!-- FTP 加载状态 -->
     <div v-if="ftpLoading" class="status-info">加载中...</div>
     <div v-else-if="ftpError" class="status-error">{{ ftpError }}</div>
-
-    <!-- FTP 图片网格 -->
-    <div v-else-if="ftpImages.length === 0" class="status-info">暂无图片</div>
-    <div v-else class="image-grid">
-      <div
-        v-for="name in ftpImages"
-        :key="name"
-        class="image-card"
-        @click="openFtpPreview(name)"
-      >
-        <img :src="ftpImageUrl(name)" :alt="name" loading="lazy" />
-        <span class="image-name">{{ name }}</span>
+    <template v-else>
+      <!-- 目录网格 -->
+      <div v-if="directories.length > 0" class="dir-grid">
+        <div
+          v-for="dir in directories"
+          :key="dir"
+          class="dir-card"
+          @click="enterDir(dir)"
+        >
+          <span class="dir-icon">📁</span>
+          <span class="dir-name">{{ dir }}</span>
+        </div>
       </div>
-    </div>
+
+      <!-- 返回上级 -->
+      <button
+        v-if="dirHistory.length > 0"
+        class="back-btn"
+        @click="goBack"
+      >⬆ 返回上级</button>
+
+      <!-- 图片网格 -->
+      <div v-if="ftpFiles.length === 0 && directories.length === 0" class="status-info">此目录下没有文件</div>
+      <div v-else-if="ftpFiles.length > 0" class="image-grid">
+        <div
+          v-for="name in ftpFiles"
+          :key="name"
+          class="image-card"
+          @click="openFtpPreview(name)"
+        >
+          <img :src="ftpImageUrl(currentDir ? `${currentDir}/${name}` : name)" :alt="name" loading="lazy" />
+          <span class="image-name">{{ name }}</span>
+        </div>
+      </div>
+    </template>
 
     <hr class="divider" />
 
@@ -163,6 +310,102 @@ onMounted(loadFtpImages)
   margin-top: 6px;
 }
 
+/* ===== 面包屑 ===== */
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  background: #0f172a;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.crumb {
+  color: #64748b;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.crumb:hover {
+  color: #60a5fa;
+  background: #1e293b;
+}
+
+.crumb.active {
+  color: #e2e8f0;
+  font-weight: 500;
+  cursor: default;
+}
+
+.crumb-sep {
+  color: #334155;
+  margin: 0 2px;
+}
+
+/* ===== 目录网格 ===== */
+.dir-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.dir-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.15s;
+}
+
+.dir-card:hover {
+  border-color: #3b82f6;
+  background: #1e293b;
+}
+
+.dir-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.dir-name {
+  font-size: 12px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===== 返回上级 ===== */
+.back-btn {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+  background: #0f172a;
+  border: 1px dashed #334155;
+  border-radius: 6px;
+  color: #64748b;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.back-btn:hover {
+  color: #60a5fa;
+  border-color: #3b82f6;
+}
+
+/* ===== 图片网格 ===== */
 .image-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -200,6 +443,7 @@ onMounted(loadFtpImages)
   text-overflow: ellipsis;
 }
 
+/* ===== HTTP ===== */
 .http-input-row {
   display: flex;
   gap: 10px;

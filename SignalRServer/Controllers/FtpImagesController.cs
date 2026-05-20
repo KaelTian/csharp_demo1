@@ -22,19 +22,25 @@ public class FtpImagesController : ControllerBase
     private string FtpRoot => _configuration.GetValue<string>("Ftp:RootPath") ?? "/";
 
     /// <summary>
-    /// 列出 FTP 服务器上的所有图片文件
+    /// 列出 FTP 服务器上指定目录的图片文件和子目录
     /// </summary>
     [HttpGet]
-    public async Task<ActionResult<List<string>>> ListImages()
+    public async Task<ActionResult> ListImages([FromQuery] string? path = null)
     {
         try
         {
             using var client = new AsyncFtpClient(FtpHost, FtpUser, FtpPass);
             await client.Connect();
 
-            var files = await client.GetListing(FtpRoot);
+            var targetPath = string.IsNullOrEmpty(path) ? FtpRoot : $"{FtpRoot}/{path}";
+            var items = await client.GetListing(targetPath);
 
-            var imageFiles = files
+            var directories = items
+                .Where(f => f.Type == FtpObjectType.Directory)
+                .Select(f => f.Name)
+                .ToList();
+
+            var imageFiles = items
                 .Where(f => f.Type == FtpObjectType.File &&
                             (f.Name.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase) ||
                              f.Name.EndsWith(".jpeg", StringComparison.OrdinalIgnoreCase) ||
@@ -43,7 +49,7 @@ public class FtpImagesController : ControllerBase
                 .ToList();
 
             await client.Disconnect();
-            return Ok(imageFiles);
+            return Ok(new { directories, files = imageFiles, currentPath = path ?? "" });
         }
         catch (Exception ex)
         {
@@ -53,15 +59,15 @@ public class FtpImagesController : ControllerBase
     }
 
     /// <summary>
-    /// 获取指定图片文件的流
+    /// 获取指定图片文件的流（支持多级子目录路径）
     /// </summary>
-    [HttpGet("{filename}")]
-    public async Task<IActionResult> GetImage(string filename)
+    [HttpGet("{*filepath}")]
+    public async Task<IActionResult> GetImage(string filepath)
     {
-        // 简单安全检查：防止路径遍历
-        if (filename.Contains("..") || filename.Contains("/") || filename.Contains("\\"))
+        // 防止路径遍历攻击：只拦截 ".."，允许正常子目录 "/"
+        if (filepath.Contains(".."))
         {
-            return BadRequest(new { error = "非法的文件名" });
+            return BadRequest(new { error = "非法的文件路径" });
         }
 
         try
@@ -70,26 +76,26 @@ public class FtpImagesController : ControllerBase
             await client.Connect();
 
             // 判断文件是否存在
-            var exists = await client.FileExists($"{FtpRoot}/{filename}");
+            var exists = await client.FileExists($"{FtpRoot}/{filepath}");
             if (!exists)
             {
-                return NotFound(new { error = $"文件 {filename} 不存在" });
+                return NotFound(new { error = $"文件 {filepath} 不存在" });
             }
 
             var ms = new MemoryStream();
-            await client.DownloadStream(ms, $"{FtpRoot}/{filename}");
+            await client.DownloadStream(ms, $"{FtpRoot}/{filepath}");
             ms.Position = 0;
 
             // 根据扩展名推断 ContentType
-            var contentType = filename.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+            var contentType = filepath.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
                 ? "image/png"
                 : "image/jpeg";
-
-            return File(ms, contentType, enableRangeProcessing: true);
+            _logger.LogInformation($"获取图片信息: {filepath} {contentType}");
+            return File(ms, contentType,filepath, enableRangeProcessing: true);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "下载图片 {Filename} 失败", filename);
+            _logger.LogError(ex, "下载图片 {Filename} 失败", filepath);
             return StatusCode(500, new { error = $"下载图片失败", detail = ex.Message });
         }
     }
