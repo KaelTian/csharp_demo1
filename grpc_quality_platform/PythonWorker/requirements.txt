@@ -1,0 +1,5 @@
+grpcio>=1.60.0
+numpy>=1.24.0
+
+# 重新生成 proto 桩代码时需要: pip install grpcio-tools
+# python -m grpc_tools.protoc -I../protos --python_out=. --grpc_python_out=. ../protos/qualityinsight.proto

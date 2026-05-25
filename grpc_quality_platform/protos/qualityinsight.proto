@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package qualityinsight;
+
+option csharp_namespace = "QualityInsight";
+
+// ==================== 数据模型 ====================
+
+// 产品检测数据
+message ProductData {
+  string product_id = 1;
+  string production_line = 2;       // 产线编号
+  int64 timestamp = 3;
+  double temperature = 4;            // 温度(℃)
+  double pressure = 5;               // 压力(MPa)
+  double dimension_x = 6;            // 长(mm)
+  double dimension_y = 7;            // 宽(mm)
+  double dimension_z = 8;            // 高(mm)
+  double weight = 9;                 // 重量(g)
+  string station_id = 10;            // 工站
+}
+
+// 质检结果
+message QualityResult {
+  string product_id = 1;
+  bool passed = 2;
+  repeated string defects = 3;           // 检测出的缺陷
+  double quality_score = 4;              // 综合质量分 0-100
+  int64 inspected_at = 5;
+  double anomaly_index = 6;              // 异常指数
+  string inspector = 7;                  // python / rule / human
+  map<string, double> measurements = 8;  // 各维度偏差值
+  string production_line = 9;
+}
+
+// 告警事件
+message AlertEvent {
+  string alert_id = 1;
+  string product_id = 2;
+  string production_line = 3;
+  string severity = 4;              // INFO / WARNING / CRITICAL
+  string alert_type = 5;            // dimension_deviation / temperature / pressure / anomaly
+  string message = 6;
+  double threshold = 7;
+  double actual_value = 8;
+  int64 created_at = 9;
+  bool acknowledged = 10;
+}
+
+// 仪表盘摘要
+message DashboardSummary {
+  int32 total_products = 1;
+  int32 passed_count = 2;
+  int32 failed_count = 3;
+  double pass_rate = 4;
+  double avg_quality_score = 5;
+  string top_defect_type = 6;
+  int32 active_alerts = 7;
+  int64 report_time = 8;
+  repeated AlertEvent recent_alerts = 9;
+  map<string, double> line_stats = 10;  // 各产线通过率
+  map<string, double> defect_distribution = 11;
+  map<string, double> score_trend = 12; // 最近质量趋势
+}
+
+// Worker 信息
+message WorkerInfo {
+  string worker_id = 1;
+  string language = 2;               // python / csharp
+  string host = 3;                   // Worker 服务地址
+  int32 port = 4;                    // Worker 服务端口
+  repeated string capabilities = 5;  // quality_check / anomaly_detection / statistics
+  int64 last_heartbeat = 6;
+}
+
+// 处理任务请求
+message ProcessRequest {
+  string task_id = 1;
+  string worker_id = 2;
+  string analysis_type = 3;          // quality_check / anomaly_detection / statistics
+  repeated ProductData products = 4;
+}
+
+message ProcessResponse {
+  string task_id = 1;
+  string worker_id = 2;
+  bool success = 3;
+  repeated QualityResult results = 4;
+  repeated AlertEvent alerts = 5;
+  string summary = 6;
+}
+
+// ==================== 请求/响应 ====================
+
+message IngestionSummary {
+  bool success = 1;
+  string message = 2;
+  int32 products_received = 3;
+  int32 failed_count = 4;
+}
+
+message IngestionResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message RegistrationResponse {
+  bool accepted = 1;
+  string server_id = 2;
+  int32 heartbeat_interval_seconds = 3;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+  bool has_pending_tasks = 2;
+}
+
+message DashboardQuery {
+  string production_line = 1;       // 空 = 全部
+  string time_range = 2;            // 1h / 24h / 7d / all
+  bool include_alerts = 3;
+}
+
+message AlertFilter {
+  string production_line = 1;
+  bool unacknowledged_only = 2;
+}
+
+// ==================== 服务定义 ====================
+
+// 数据接入服务
+service DataIngestion {
+  // 双向流批量提交产品数据
+  rpc SubmitProductData (stream ProductData) returns (IngestionSummary);
+  // 单条提交
+  rpc SubmitSingleProduct (ProductData) returns (IngestionResponse);
+}
+
+// Worker 注册服务（C# Server 端托管，Python Worker 调用）
+service WorkerRegistry {
+  // Worker 注册到服务器
+  rpc RegisterWorker (WorkerInfo) returns (RegistrationResponse);
+  // Worker 心跳保活
+  rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+// 数据处理服务（Python Worker 端托管，C# Server 调用）
+service DataProcessing {
+  // 服务器指派处理任务给 Worker
+  rpc ProcessData (ProcessRequest) returns (ProcessResponse);
+}
+
+// 数据查询服务（Dashboard 使用）
+service QualityQuery {
+  // 获取仪表盘摘要
+  rpc GetDashboardSummary (DashboardQuery) returns (DashboardSummary);
+  // 流式推送告警
+  rpc StreamAlerts (AlertFilter) returns (stream AlertEvent);
+}
