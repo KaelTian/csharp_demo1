@@ -19,6 +19,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "WebDashboard", "grpc_qualit
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MQTTTutorial", "MQTTTutorial\MQTTTutorial.csproj", "{AFC44C72-9752-46F9-B326-163F1DF29823}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CSharpCoreDemos", "CSharpCoreDemos\CSharpCoreDemos.csproj", "{480C6F3D-7017-44F6-AC49-F3A6109D4AFC}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -53,6 +55,10 @@ Global
 		{AFC44C72-9752-46F9-B326-163F1DF29823}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{AFC44C72-9752-46F9-B326-163F1DF29823}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{AFC44C72-9752-46F9-B326-163F1DF29823}.Release|Any CPU.Build.0 = Release|Any CPU
+		{480C6F3D-7017-44F6-AC49-F3A6109D4AFC}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{480C6F3D-7017-44F6-AC49-F3A6109D4AFC}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{480C6F3D-7017-44F6-AC49-F3A6109D4AFC}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{480C6F3D-7017-44F6-AC49-F3A6109D4AFC}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
