@@ -27,6 +27,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "S7Protocol", "S7Protocol\S7
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RedisStringDemo", "RedisStringDemo\RedisStringDemo.csproj", "{C24E8996-48E8-4627-BB5F-AA384A47AE34}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "PLCProtocolTutorial", "PLCProtocolTutorial\PLCProtocolTutorial.csproj", "{BAEA9CC5-BBE2-44AE-8507-EA99773A05CC}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
