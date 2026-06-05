@@ -5,11 +5,65 @@ using System.Runtime;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Opc.Ua;
+using Opc.Ua.Client;
 
 namespace PlcMemoryDemo;
 
 class Program
 {
+    // OPC UA 共享配置（静态缓存，各场景复用）
+    static readonly ApplicationConfiguration? _opcConfig;
+    static readonly bool _opcConfigReady;
+
+    static Program()
+    {
+        try
+        {
+            var cfg = new ApplicationConfiguration
+            {
+                ApplicationName = "PlcMemoryDemo",
+                ApplicationUri = $"urn:{Environment.MachineName}:PlcMemoryDemo",
+                ApplicationType = ApplicationType.Client,
+                SecurityConfiguration = new SecurityConfiguration
+                {
+                    AutoAcceptUntrustedCertificates = true,
+                    ApplicationCertificate = new CertificateIdentifier
+                    {
+                        StoreType = "Directory",
+                        StorePath = "[LocalApplicationData]OPC Foundation/pki/own",
+                        SubjectName = "PlcMemoryDemo"
+                    },
+                    TrustedPeerCertificates = new CertificateTrustList
+                    {
+                        StoreType = "Directory",
+                        StorePath = "[LocalApplicationData]OPC Foundation/pki/trusted"
+                    },
+                    TrustedIssuerCertificates = new CertificateTrustList
+                    {
+                        StoreType = "Directory",
+                        StorePath = "[LocalApplicationData]OPC Foundation/pki/issuer"
+                    },
+                    RejectedCertificateStore = new CertificateTrustList
+                    {
+                        StoreType = "Directory",
+                        StorePath = "[LocalApplicationData]OPC Foundation/pki/rejected"
+                    }
+                },
+                TransportQuotas = new TransportQuotas { OperationTimeout = 5000 },
+                ClientConfiguration = new ClientConfiguration { DefaultSessionTimeout = 30000 }
+            };
+            cfg.Validate(ApplicationType.Client).GetAwaiter().GetResult();
+            _opcConfig = cfg;
+            _opcConfigReady = true;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[OPC UA] Config init: {ex.Message}");
+            _opcConfigReady = false;
+        }
+    }
+
     static void Main()
     {
         Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -69,6 +123,40 @@ class Program
         Console.WriteLine("  问题版本每 12s 分配数 GB → 持续数分钟 → OOM");
         Console.WriteLine("  优化版本丢弃过载事件，分配量极少 → 安全");
         Console.WriteLine("══════════════════════════════════════════════════════════════════════");
+
+        // ════════════ OPC UA 客户端断连泄漏场景 ════════════
+        if (_opcConfigReady)
+        {
+            const string OpcUaUrl = "opc.tcp://192.168.0.11:4840";
+            const int OpcUaLines = 4;
+            const double OpcUaHz = 2;
+            const int OpcUaRunSec = 30;
+
+            Console.WriteLine("\n══════════════════════════════════════════════════════════════════════");
+            Console.WriteLine("  OPC UA 客户端断连 · 内存泄漏模拟");
+            Console.WriteLine($"  服务器={OpcUaUrl}  并发={OpcUaLines}×{OpcUaHz}Hz  运行={OpcUaRunSec}s");
+            Console.WriteLine("══════════════════════════════════════════════════════════════════════\n");
+
+            RunScenario("【OPC UA 泄漏】断连不释放 Session", () =>
+            {
+                var sim = new OpcUaLeakSimulator(_opcConfig!, OpcUaUrl, BlockMs);
+                RunContinuous(sim, OpcUaLines, OpcUaHz, OpcUaRunSec);
+                return sim.Stats;
+            });
+            ForceGc();
+
+            RunScenario("【OPC UA 安全】using + finally 确保释放", () =>
+            {
+                var sim = new OpcUaSafeSimulator(_opcConfig!, OpcUaUrl, BlockMs);
+                RunContinuous(sim, OpcUaLines, OpcUaHz, OpcUaRunSec);
+                return sim.Stats;
+            });
+        }
+        else
+        {
+            Console.WriteLine("\n⚠️ OPC UA 配置不可用（请确认 OPC UA Server 在运行）");
+        }
+
         Console.ReadLine();
     }
 
@@ -281,6 +369,122 @@ public class TimeoutSimulator
             catch (OperationCanceledException) { }
             catch { }
             finally { Interlocked.Decrement(ref _pend); }
+        });
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 【OPC UA 泄漏】断连不释放 Session — 模拟真实泄漏场景
+// ═══════════════════════════════════════════════════════════════
+public class OpcUaLeakSimulator
+{
+    readonly ApplicationConfiguration _config;
+    readonly string _url;
+    readonly int _blockMs;
+    long _pend;
+    // 用静态 List 持有 session 引用，模拟"泄漏"（阻止 GC 回收）
+    static readonly List<Session> _leakRoot = new();
+
+    public SimStats Stats => new(Interlocked.Read(ref _pend), 0);
+
+    public OpcUaLeakSimulator(ApplicationConfiguration config, string url, int blockMs)
+    {
+        _config = config; _url = url; _blockMs = blockMs;
+    }
+
+    public void PushEvent(List<PlcTag> changed)
+    {
+        Interlocked.Increment(ref _pend);
+        Task.Run(async () =>
+        {
+            Session? session = null;
+            try
+            {
+                var ep = new ConfiguredEndpoint(null, new EndpointDescription
+                {
+                    EndpointUrl = _url,
+                    SecurityMode = MessageSecurityMode.None,
+                    SecurityPolicyUri = SecurityPolicies.None
+                });
+
+                // 连接超时 10s
+                Task<Session> connectTask = Session.Create(
+                    _config, ep, false, "PlcMemoryDemo", 30000, null, null);
+                if (await Task.WhenAny(connectTask, Task.Delay(10_000)) != connectTask)
+                    throw new TimeoutException("OPC UA connect timeout");
+                session = connectTask.Result;
+
+                // ❌ 泄漏：session 放入静态列表，GC 无法回收
+                lock (_leakRoot) _leakRoot.Add(session);
+                session = null;
+            }
+            catch
+            {
+                // ❌ 异常路径：session 仍然持有引用，泄漏
+                if (session != null)
+                {
+                    lock (_leakRoot) _leakRoot.Add(session);
+                    session = null;
+                }
+            }
+            finally { Interlocked.Decrement(ref _pend); }
+        });
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// 【OPC UA 安全】using + try/finally 确保 Session 释放
+// ═══════════════════════════════════════════════════════════════
+public class OpcUaSafeSimulator
+{
+    readonly ApplicationConfiguration _config;
+    readonly string _url;
+    readonly int _blockMs;
+    long _pend, _drop;
+
+    public SimStats Stats => new(Interlocked.Read(ref _pend), Interlocked.Read(ref _drop));
+
+    public OpcUaSafeSimulator(ApplicationConfiguration config, string url, int blockMs)
+    {
+        _config = config; _url = url; _blockMs = blockMs;
+    }
+
+    public void PushEvent(List<PlcTag> changed)
+    {
+        if (Interlocked.Read(ref _pend) >= 30) { Interlocked.Increment(ref _drop); return; }
+        Interlocked.Increment(ref _pend);
+        Task.Run(async () =>
+        {
+            Session? session = null;
+            try
+            {
+                var ep = new ConfiguredEndpoint(null, new EndpointDescription
+                {
+                    EndpointUrl = _url,
+                    SecurityMode = MessageSecurityMode.None,
+                    SecurityPolicyUri = SecurityPolicies.None
+                });
+
+                Task<Session> connectTask = Session.Create(
+                    _config, ep, false, "PlcMemoryDemo", 30000, null, null);
+                if (await Task.WhenAny(connectTask, Task.Delay(10_000)) != connectTask)
+                    throw new TimeoutException("OPC UA connect timeout");
+                session = connectTask.Result;
+
+                // 模拟正常工作（占用 session 一段时间）
+                await Task.Delay(_blockMs, CancellationToken.None);
+            }
+            catch { }
+            finally
+            {
+                // ✅ finally 块确保无论成功/异常都释放
+                if (session != null)
+                {
+                    try { await session.CloseAsync(); } catch { }
+                    session.Dispose();
+                }
+                Interlocked.Decrement(ref _pend);
+            }
         });
     }
 }
